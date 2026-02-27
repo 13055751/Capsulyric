@@ -37,110 +37,44 @@ class LyricService : Service() {
     private val onlineLyricFetcher = OnlineLyricFetcher()
     private val serviceScope = CoroutineScope(Dispatchers.Main + Job())
     private var fetchJob: Job? = null
-
     private val lyricObserver = Observer<LyricRepository.LyricInfo?> { info ->
         if (info != null && info.lyric.isNotBlank()) {
             val lyric = info.lyric
-            
-             // Check for static metadata masquerading as lyrics
+
+            // Check for static metadata masquerading as lyrics
             val metadata = LyricRepository.getInstance().liveMetadata.value
             val title = metadata?.title ?: ""
             val artist = metadata?.artist ?: ""
             val pkg = metadata?.packageName
 
-            // Strict check: Lyric equals title, artist, or "Title - Artist" combo
-            val isStatic = (lyric.equals(title, ignoreCase = true) || 
-                           lyric.equals(artist, ignoreCase = true) ||
-                           lyric.equals("$title - $artist", ignoreCase = true) ||
-                           lyric.equals("$artist - $title", ignoreCase = true))
+            val isStatic = (lyric.equals(title, ignoreCase = true) ||
+                    lyric.equals(artist, ignoreCase = true) ||
+                    lyric.equals("$title - $artist", ignoreCase = true) ||
+                    lyric.equals("$artist - $title", ignoreCase = true))
 
             if (isStatic) {
                 AppLogger.getInstance().log(TAG, "⚠️ Detected static metadata as lyric: '$lyric'")
-                
-                // If this happens, check if we should fetch online
-                // Note: We use a fallback rule if none exists (handled in Helper or here)
                 if (pkg != null) {
-                    val rule = ParserRuleHelper.getRuleForPackage(this, pkg) 
-                               ?: ParserRuleHelper.createDefaultRule(pkg) // Fallback if no rule exists
-
+                    val rule = ParserRuleHelper.getRuleForPackage(this, pkg)
+                        ?: ParserRuleHelper.createDefaultRule(pkg)
                     if (rule.useOnlineLyrics) {
                         AppLogger.getInstance().log(TAG, "Static metadata detected -> Triggering online fetch")
                         tryFetchOnlineLyrics()
-                        return@Observer // Don't show static text if fetching online
+                        return@Observer
                     } else {
                         AppLogger.getInstance().log(TAG, "Static metadata detected but online fetch disabled")
                     }
                 }
             }
 
-            // Auto-start Capsule upon valid lyric (even if static, if we didn't return above)
-            if (capsuleHandler?.isRunning() != true) {
-                capsuleHandler?.start()
-                
-                // START PROGRESS TRACKING
-                isPlaying = true
-                handler.post(updateTask)
-            } else {
-                // Capsule running: Force immediate update
-                capsuleHandler?.updateLyricImmediate(info.lyric)
-            }
+            // >>> 迁移后只用通知栏推送，不调用 capsuleHandler <<<
+            lyricNotificationManager.showLyricNotification(lyric)
         } else {
-            // Stop capsule if we received an empty lyric signal (e.g., song change or pure music)
-            if (capsuleHandler?.isRunning() == true) {
-                capsuleHandler?.stop()
-                AppLogger.getInstance().log(TAG, "🛑 Capsule stopped: Lyric is empty")
-            }
+            // 歌词为空时移除通知
+            lyricNotificationManager.cancelLyricNotification()
         }
     }
-    
-    // Delayed Stop Logic
-    private val delayedStopRunnable = Runnable {
-        if (capsuleHandler?.isRunning() == true) {
-            capsuleHandler?.stop()
-            AppLogger.getInstance().log(TAG, "🛑 Capsule stopped: Playback stopped (Delayed)")
-        }
-    }
-
-    private val playbackObserver = Observer<Boolean> { playing ->
-        if (playing) {
-            // Cancel any pending stop
-            handler.removeCallbacks(delayedStopRunnable)
-
-            // Resume/Start capsule if we have valid lyrics
-            val currentLyric = LyricRepository.getInstance().liveLyric.value
-            if (currentLyric != null && currentLyric.lyric.isNotBlank() && capsuleHandler?.isRunning() != true) {
-                capsuleHandler?.start()
-                
-                // Force immediate update with current lyric
-                capsuleHandler?.updateLyricImmediate(currentLyric.lyric)
-                AppLogger.getInstance().log(TAG, "▶️ Capsule started: Playback resumed")
-            }
-            // Start progress tracking (merged from second observer)
-            startProgressUpdater()
-        } else {
-            // Stop progress tracking (merged from second observer)
-            stopProgressUpdater()
-            
-            // Debounce: Cancel pending stop to restart timer if we get multiple 'false' events
-            handler.removeCallbacks(delayedStopRunnable)
-
-            // Get delay preference
-            val prefs = getSharedPreferences("IslandLyricsPrefs", Context.MODE_PRIVATE)
-            val delay = prefs.getLong("notification_dismiss_delay", 0L)
-            
-            AppLogger.getInstance().log(TAG, "🛑 Playback stopped. Delay=$delay ms")
-
-            if (delay > 0) {
-                 AppLogger.getInstance().log(TAG, "⏳ Scheduling capsule stop in ${delay}ms")
-                 handler.postDelayed(delayedStopRunnable, delay)
-            } else {
-                 // Immediate stop
-                 if (capsuleHandler?.isRunning() == true) {
-                    capsuleHandler?.stop()
-                    AppLogger.getInstance().log(TAG, "🛑 Capsule stopped immediately (Delay=0)")
-                 }
-            }
-        }
+}
     }
 
     private val superLyricStub = object : ISuperLyric.Stub() {
